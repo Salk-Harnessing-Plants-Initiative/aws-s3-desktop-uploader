@@ -25,6 +25,7 @@ from watchdog.events import FileSystemEventHandler, FileCreatedEvent
 # For AWS S3
 import boto3
 from botocore.exceptions import ClientError
+from concurrent.futures import ThreadPoolExecutor
 # For logging remotely to AWS CloudWatch
 from boto3.session import Session
 import watchtower
@@ -123,6 +124,7 @@ def process(file_path, s3_client, bucket, bucket_dir, done_dir, error_dir, unpro
     log_info=True):
     """Name, upload, move file
     """
+    print("PROCESSING ", file_path) #TEMPORARY
     logger = logging.getLogger(__name__)
     object_name = generate_bucket_key(file_path, bucket_dir)
     try:
@@ -133,7 +135,7 @@ def process(file_path, s3_client, bucket, bucket_dir, done_dir, error_dir, unpro
             logger.info("S3 Desktop Uploader: Successfully uploaded {} to {} as {}".format(file_path, bucket, object_name))
     except Exception as e:
         if log_info:
-            logger.exception("S3 Desktop Uploader: Failed to upload {}: {}".format(file_path, str(e)))
+            logger.error("S3 Desktop Uploader: Failed to upload {}: {}".format(file_path, str(e)))
         error_path = make_parallel_path(unprocessed_dir, error_dir, file_path)
         move(file_path, error_path)
 
@@ -189,19 +191,20 @@ class S3EventHandler(FileSystemEventHandler):
     """Handler for what to do if watchdog detects a filesystem change
     """
 
-    def __init__(self, s3_client, s3_bucket, s3_bucket_dir, unprocessed_dir, done_dir, error_dir):
+    def __init__(self, s3_client, s3_bucket, s3_bucket_dir, unprocessed_dir, done_dir, error_dir, executor):
         self.s3_client = s3_client
         self.s3_bucket = s3_bucket
         self.s3_bucket_dir = s3_bucket_dir
         self.unprocessed_dir = unprocessed_dir
         self.done_dir = done_dir
         self.error_dir = error_dir
+        self.executor = executor
 
     def on_created(self, event):
         is_file = not event.is_directory
         if is_file:
-            process(event.src_path, self.s3_client, self.s3_bucket, self.s3_bucket_dir, 
-                self.done_dir, self.error_dir, self.unprocessed_dir)
+            self.executor.submit(process, event.src_path, self.s3_client, self.s3_bucket, 
+                self.s3_bucket_dir, self.done_dir, self.error_dir, self.unprocessed_dir)
 
 def main(use_cloudwatch=True):
     logger = logging.getLogger(__name__)
@@ -230,7 +233,8 @@ def main(use_cloudwatch=True):
     preexisting = get_preexisting_files(unprocessed_dir)
 
     # Setup the watchdog handler for new files that are added while the script is running
-    event_handler = S3EventHandler(s3_client, bucket, bucket_dir, unprocessed_dir, done_dir, error_dir)
+    executor = ThreadPoolExecutor(max_workers=10)
+    event_handler = S3EventHandler(s3_client, bucket, bucket_dir, unprocessed_dir, done_dir, error_dir, executor)
     observer = Observer()
     observer.schedule(event_handler, unprocessed_dir, recursive=True)
     observer.start()
@@ -238,7 +242,7 @@ def main(use_cloudwatch=True):
     # Upload & process any preexisting files
     if preexisting:
         for file_path in preexisting:
-            process(file_path, s3_client, bucket, bucket_dir, done_dir, error_dir, unprocessed_dir)
+            executor.submit(process, file_path, s3_client, bucket, bucket_dir, done_dir, error_dir, unprocessed_dir)
 
     # Keep the main thread running so watchdog handler can be still be called
     keep_running(observer, config["send_heartbeat"], config["heartbeat_seconds"])
