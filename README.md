@@ -1,4 +1,4 @@
-# AWS S3 desktop file uploader
+# AWS S3 desktop file uploader - DEPRECATED
 Python script for uploading files to an AWS S3 bucket with some additional features
 
 * On startup, detects all files in the `unprocessed` directory (and recursive subdirectories),
